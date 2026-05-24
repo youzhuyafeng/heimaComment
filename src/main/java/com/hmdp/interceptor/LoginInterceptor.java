@@ -13,14 +13,11 @@ import javax.servlet.http.HttpSession;
 @Component
 public class LoginInterceptor implements HandlerInterceptor {
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
-        HttpSession session = request.getSession();
-        Object obj = session.getAttribute("user");
-        if (obj == null) {
+        UserDTO user =  UserHolder.getUser();
+        if (user == null) {
             response.setStatus(401);
             return false;
         }
-        UserDTO user = (UserDTO) obj;
-        UserHolder.saveUser(user);
         return true;
     }
 

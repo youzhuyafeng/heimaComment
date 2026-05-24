@@ -1,5 +1,6 @@
 package com.hmdp.service.impl;
 
+import cn.hutool.core.bean.BeanUtil;
 import cn.hutool.core.util.ObjectUtil;
 import cn.hutool.core.util.RandomUtil;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
@@ -14,11 +15,16 @@ import com.hmdp.utils.SystemConstants;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpSession;
 import java.time.LocalDateTime;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 /**
  * <p>
@@ -32,6 +38,8 @@ import java.time.LocalDateTime;
 @Service
 public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IUserService {
 
+    @Autowired
+    private StringRedisTemplate stringRedisTemplate;
 
     @Override
     public Result sendCode(String phone, HttpSession session){
@@ -40,7 +48,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
             return Result.fail("手机号格式不正确！");
         }
         String code = RandomUtil.randomNumbers(6);
-        session.setAttribute("code", code);
+        stringRedisTemplate.opsForValue().set("login:code:"+phone, code,5 , TimeUnit.MINUTES);
         log.info("发送验证码:{}", code);
         return Result.ok();
     }
@@ -51,7 +59,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
             return Result.fail("手机号格式不正确！");
         }
 
-        String code = session.getAttribute("code").toString();
+        String code = stringRedisTemplate.opsForValue().get("login:code:"+loginForm.getPhone());
 
         if(!ObjectUtil.equals(code, loginForm.getCode())) {
             return Result.fail("验证码错误！");
@@ -61,10 +69,16 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         if(user == null) {
             user = this.addUserByPhone(loginForm.getPhone());
         }
+        String token = UUID.randomUUID().toString();
         UserDTO userDTO = new UserDTO();
         BeanUtils.copyProperties(user,userDTO);
-        session.setAttribute("user", userDTO);
-        return Result.ok();
+        Map<String,String> map = new HashMap<>();
+        map.put("id",userDTO.getId().toString());
+        map.put("nickName",userDTO.getNickName());
+        map.put("icon",userDTO.getIcon());
+        stringRedisTemplate.opsForHash().putAll("login:token:"+token,map);
+        stringRedisTemplate.expire("login:token:"+token,30, TimeUnit.MINUTES);
+        return Result.ok(token);
     }
 
     private User addUserByPhone(String phone) {
