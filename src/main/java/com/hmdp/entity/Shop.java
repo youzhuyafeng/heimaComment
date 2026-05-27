@@ -96,6 +96,7 @@ public class Shop implements Serializable {
     /**
      * 创建时间
      */
+
     private LocalDateTime createTime;
 
     /**
