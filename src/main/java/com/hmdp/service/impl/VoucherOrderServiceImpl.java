@@ -9,14 +9,25 @@ import com.hmdp.service.ISeckillVoucherService;
 import com.hmdp.service.IVoucherOrderService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.utils.RedisIdWorker;
+import com.hmdp.utils.SimpleRedisLock;
 import com.hmdp.utils.UserHolder;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.aop.framework.AopContext;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import javax.annotation.PostConstruct;
 import javax.annotation.Resource;
-import java.time.LocalDateTime;
+import java.util.Collections;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * <p>
@@ -26,6 +37,7 @@ import java.time.LocalDateTime;
  * @author 虎哥
  * @since 2021-12-22
  */
+@Slf4j
 @Service
 public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, VoucherOrder> implements IVoucherOrderService {
     @Autowired
@@ -34,10 +46,63 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private ISeckillVoucherService seckillVoucherService;
     @Autowired
     private IVoucherOrderService iVoucherOrderService;
+    @Autowired
+    private StringRedisTemplate stringRedisTemplate;
+
+    private final BlockingQueue<VoucherOrder> blockingQueue = new ArrayBlockingQueue<VoucherOrder>(1024*1024);
+
+    private final ExecutorService executorService =  Executors.newSingleThreadExecutor();
+
+    @PostConstruct
+    public void init() {
+        executorService.submit(new Runnable() {
+            @Override
+            public void run() {
+                while(true){
+                    try {
+                        VoucherOrder voucherOrder = blockingQueue.take();
+                        iVoucherOrderService.createVoucher(voucherOrder);
+                    } catch (Exception e) {
+                        log.error("处理订单请求时发生异常:{}",e.getMessage());
+                        e.printStackTrace();
+                    }
+                }
+            }
+        });
+    }
+
+
+
+    private static final DefaultRedisScript<Long> redisScript;
+    static{
+        redisScript = new DefaultRedisScript<>();
+        redisScript.setLocation(new ClassPathResource("seckill.lua"));
+        redisScript.setResultType(Long.class);
+    }
+    public Result seckillVoucher(Long voucherId){
+        String userId = UserHolder.getUser().getId().toString();
+        Long result = stringRedisTemplate.execute(
+                redisScript,
+                Collections.emptyList(),
+                voucherId.toString(),
+                userId
+        );
+        if(result.intValue()!=0){
+            return Result.fail(result==1?"来晚啦！库存已空！":"请勿重复下单！");
+        }
+        long orderId = redisIdWorker.generateId("order");
+        //阻塞队列&消息队列异步处理
+        VoucherOrder voucherOrder = new VoucherOrder();
+        voucherOrder.setId(orderId);
+        voucherOrder.setVoucherId(voucherId);
+        voucherOrder.setUserId(UserHolder.getUser().getId());
+        blockingQueue.add(voucherOrder);
+        return Result.ok(orderId);
+    }
 
     //乐观锁
 
-    public Result seckillVoucher(Long voucherId) {
+/*    public Result seckillVoucher(Long voucherId) {
         SeckillVoucher voucher =  seckillVoucherService.getById(voucherId);
         if(voucher.getBeginTime().isAfter(LocalDateTime.now())){
             return Result.fail("活动未开始！");
@@ -49,15 +114,25 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             return Result.fail("库存不足！");
         }
         Long userId = UserHolder.getUser().getId();
-        synchronized (userId.toString().intern()) {
-            //this.createVoucher(voucher);  事务失效！
-
-            //另一种方案，通过java AspectJ包提供的AopContext获取当前类的代理对象
-            //IVoucherOrderService proxy = (IVoucherOrderService)AopContext.currentProxy();
-            //proxy.createVoucher(voucher);
-            return iVoucherOrderService.createVoucher(voucher);
+        SimpleRedisLock lock = new SimpleRedisLock("order:"+userId.toString(),stringRedisTemplate);
+        boolean getLock = lock.tryLock(2);
+        if(!getLock){
+            return Result.fail("不允许重复下单！");
         }
-    }
+        try{
+            return iVoucherOrderService.createVoucher(voucher);
+        }finally {
+            lock.unlock();
+        }
+//        synchronized (userId.toString().intern()) {
+//            //this.createVoucher(voucher);  事务失效！
+//
+//            //另一种方案，通过java AspectJ包提供的AopContext获取当前类的代理对象
+//            //IVoucherOrderService proxy = (IVoucherOrderService)AopContext.currentProxy();
+//            //proxy.createVoucher(voucher);
+//            return iVoucherOrderService.createVoucher(voucher);
+//        }
+    }*/
     //一人一单
     @Transactional
     public Result createVoucher(SeckillVoucher voucher) {
@@ -86,5 +161,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         voucherOrder.setVoucherId(voucherId);
         save(voucherOrder);
         return Result.ok(voucherOrder);
+    }
+
+    public void createVoucher(VoucherOrder voucherOrder) {
+        save(voucherOrder);
     }
 }
